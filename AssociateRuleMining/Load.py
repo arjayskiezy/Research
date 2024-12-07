@@ -1,95 +1,95 @@
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from sklearn.model_selection import train_test_split
-from mlxtend.frequent_patterns import apriori, association_rules
-from mlxtend.frequent_patterns import fpgrowth
+from mlxtend.frequent_patterns import association_rules, fpgrowth
 
-# Load the dataset
-file_path = "./DATASET/ASM.csv"  # Adjust the extension if necessary
+# Step 1: Load the dataset
+file_path = './DATASET/ASM.csv'
 data = pd.read_csv(file_path)
 
-# Display the first few rows of the dataset to understand its structure
-print("Dataset Preview:")
-print(data.head())
+# Step 2: Take a 50% random sample of the data
+sampled_data = data.sample(frac=0.5, random_state=42)  # Set random_state for reproducibility
 
-# Ensure the dataset is preprocessed with one-hot encoding for categorical features
-categorical_columns = data.select_dtypes(include=['object']).columns
-one_hot_encoded_data = pd.get_dummies(data, columns=categorical_columns)
+# Step 3: Split the sampled data into 80% training and 20% testing
+train_data, test_data = train_test_split(sampled_data, test_size=0.2, random_state=42)
 
-# Split the dataset into training (80%) and testing (20%)
-train_data, test_data = train_test_split(one_hot_encoded_data, test_size=0.2, random_state=42)
+# Verify the splits
+print("Original Data Size:", len(data))
+print("Sampled Data Size (50%):", len(sampled_data))
+print("Training Data Size (80% of sampled):", len(train_data))
+print("Testing Data Size (20% of sampled):", len(test_data))
 
-# Apply the Apriori algorithm on the training set
-frequent_itemsets_train = apriori(train_data, min_support=0.2, use_colnames=True)
+# Step 4: Data Preprocessing for Eclat and FP-Growth
+def preprocess_data(data):
+    # Pivot the data to create a transactional matrix
+    transactions = data.groupby(['STORECODE', 'BRD'])['QTY'].sum().unstack().reset_index().fillna(0)
+    transactions.set_index('STORECODE', inplace=True)
+    # Convert to boolean for memory efficiency
+    return transactions > 0  # Binary conversion to boolean type
 
-# Generate association rules from the frequent itemsets
-rules_train = association_rules(frequent_itemsets_train, metric="lift", min_threshold=1.0)
+# Prepare training and testing datasets
+basket_train = preprocess_data(train_data)
+basket_test = preprocess_data(test_data)
 
-# Evaluate the rules on the test set by recalculating support, confidence, and lift
-frequent_itemsets_test = apriori(test_data, min_support=0.2, use_colnames=True)
-rules_test = association_rules(frequent_itemsets_test, metric="lift", min_threshold=1.0)
+# Step 5: Implement Eclat Algorithm
+def eclat(data, min_support=0.05, max_itemset_size=3):
+    """Simplified Eclat Algorithm for frequent itemset mining."""
+    itemsets = {}
+    num_transactions = len(data)
 
-# Visualization 1: Support vs Confidence (Training Set)
-plt.figure(figsize=(10, 6))
-sns.scatterplot(data=rules_train, x="support", y="confidence", size="lift", hue="lift", palette="viridis", sizes=(50, 300))
-plt.title("Support vs Confidence (Training Set)")
-plt.xlabel("Support")
-plt.ylabel("Confidence")
-plt.legend(title="Lift")
-plt.show()
+    # Step 1: Generate 1-itemsets
+    for col in data.columns:
+        support = data[col].sum() / num_transactions
+        if support >= min_support:
+            itemsets[frozenset([col])] = support
 
-# Visualization 2: Top 10 Rules by Lift (Training Set)
-top_rules_train = rules_train.nlargest(10, 'lift')
-plt.figure(figsize=(10, 6))
-sns.barplot(x=top_rules_train['lift'], y=top_rules_train['consequents'].apply(lambda x: ', '.join(list(x))), palette="coolwarm")
-plt.title("Top 10 Rules by Lift (Training Set)")
-plt.xlabel("Lift")
-plt.ylabel("Consequents")
-plt.show()
+    k = 2
+    while True:
+        # Stop if max itemset size is reached
+        if max_itemset_size and k > max_itemset_size:
+            break
 
-# Visualization 3: Frequent Itemsets by Support (Training Set)
-frequent_itemsets_train['itemsets'] = frequent_itemsets_train['itemsets'].apply(lambda x: ', '.join(list(x)))
-top_itemsets_train = frequent_itemsets_train.nlargest(10, 'support')
-plt.figure(figsize=(10, 6))
-sns.barplot(x=top_itemsets_train['support'], y=top_itemsets_train['itemsets'], palette="Blues_d")
-plt.title("Top 10 Frequent Itemsets by Support (Training Set)")
-plt.xlabel("Support")
-plt.ylabel("Itemsets")
-plt.show()
+        items = list(itemsets.keys())
+        new_itemsets = {}
 
-# Validation: Check test set performance of rules
-test_rules_evaluation = []
-for _, rule in rules_train.iterrows():
-    antecedents = set(rule['antecedents'])
-    consequents = set(rule['consequents'])
-    total_matches = 0
-    consequent_matches = 0
-    
-    for _, row in test_data.iterrows():
-        if antecedents.issubset(set(row[row == 1].index)):
-            total_matches += 1
-            if consequents.issubset(set(row[row == 1].index)):
-                consequent_matches += 1
-    
-    support_test = total_matches / len(test_data)
-    confidence_test = consequent_matches / total_matches if total_matches > 0 else 0
-    lift_test = confidence_test / (support_test if support_test > 0 else 1)
-    
-    test_rules_evaluation.append((rule['antecedents'], rule['consequents'], support_test, confidence_test, lift_test))
+        # Sequential computation to save resources
+        for i in range(len(items)):
+            for j in range(i + 1, len(items)):
+                candidate = items[i].union(items[j])
+                if len(candidate) == k:
+                    support = (data[list(candidate)].all(axis=1).sum()) / num_transactions
+                    if support >= min_support:
+                        new_itemsets[candidate] = support
 
-# Create a DataFrame for test rules evaluation
-test_rules_df = pd.DataFrame(test_rules_evaluation, columns=['Antecedents', 'Consequents', 'Support', 'Confidence', 'Lift'])
+        if not new_itemsets:
+            break
+        itemsets.update(new_itemsets)
+        k += 1
 
-# Display test set results
-print("\nValidation Results on Test Set:")
-print(test_rules_df)
+    return pd.DataFrame([(list(k), v) for k, v in itemsets.items()], columns=['itemset', 'support'])
 
-# Visualization 4: Support vs Confidence (Test Set)
-plt.figure(figsize=(10, 6))
-sns.scatterplot(data=test_rules_df, x="Support", y="Confidence", size="Lift", hue="Lift", palette="magma", sizes=(50, 300))
-plt.title("Support vs Confidence (Test Set)")
-plt.xlabel("Support")
-plt.ylabel("Confidence")
-plt.legend(title="Lift")
-plt.show() remove seaborn fir now
+# Run Eclat on training data
+frequent_itemsets_eclat = eclat(basket_train, min_support=0.1, max_itemset_size=3)
+print("Eclat Frequent Itemsets (Training Data):")
+print(frequent_itemsets_eclat)
+
+# Export Eclat results to CSV
+frequent_itemsets_eclat.to_csv('./Eclat_Frequent_Itemsets.csv', index=False)
+
+# Step 6: Implement FP-Growth Algorithm
+frequent_itemsets_fpgrowth = fpgrowth(basket_train, min_support=0.1, use_colnames=True)
+rules_fpgrowth = association_rules(frequent_itemsets_fpgrowth, metric="lift", min_threshold=1)
+
+print("\nFP-Growth Frequent Itemsets (Training Data):")
+print(frequent_itemsets_fpgrowth)
+
+print("\nFP-Growth Rules (Training Data):")
+print(rules_fpgrowth)
+
+# Export FP-Growth results to CSV
+frequent_itemsets_fpgrowth.to_csv('./FPGrowth_Frequent_Itemsets.csv', index=False)
+rules_fpgrowth.to_csv('./FPGrowth_Rules.csv', index=False)
+
+# Step 7: Testing Data Analysis (Optional)
+frequent_itemsets_test_fpgrowth = fpgrowth(basket_test, min_support=0.1, use_colnames=True)
+print("\nFP-Growth Frequent Itemsets (Testing Data):")
+print(frequent_itemsets_test_fpgrowth)
